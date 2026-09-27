@@ -6,12 +6,11 @@ interface PinModalProps {
   onClose: () => void;
   onSubmit: (pin: string) => Promise<void>;
   onVerifyIdentity?: (pin: string, name: string) => Promise<void>;
-  expectedName?: string | null;
   error?: string | null;
   loading?: boolean;
 }
 
-export default function PinModal({ mode, onClose, onSubmit, onVerifyIdentity, expectedName, error, loading }: PinModalProps) {
+export default function PinModal({ mode, onClose, onSubmit, onVerifyIdentity, error, loading }: PinModalProps) {
   const [pin, setPin] = useState('');
   const [name, setName] = useState('');
   const [localError, setLocalError] = useState<string | null>(null);

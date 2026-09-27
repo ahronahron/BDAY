@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { ArrowLeft, Mic, Square, Play, Pause, Upload, Trash2, Check, Heart, MessageCircle, Palette } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
+import { cloudinaryUploadsConfigured, uploadImageToCloudinary } from '@/lib/cloudinary';
 import type { Message } from '@/types';
 
 const CARD_COLORS = [
@@ -12,6 +13,14 @@ const CARD_COLORS = [
   { name: 'Gold', value: '#F5EDD8' },
   { name: 'Lavender', value: '#E8E0F0' },
   { name: 'Peach', value: '#FAE8DC' },
+  { name: 'Seafoam', value: '#D9EEE9' },
+  { name: 'Periwinkle', value: '#DFE5FA' },
+  { name: 'Coral', value: '#F6D9D0' },
+  { name: 'Lemon', value: '#F5EFBD' },
+  { name: 'Lilac', value: '#E9DDF3' },
+  { name: 'Ice', value: '#E3EFF5' },
+  { name: 'Olive', value: '#E5EACF' },
+  { name: 'Mauve', value: '#F0DFE8' },
 ];
 
 interface ContributorScreenProps {
@@ -21,65 +30,35 @@ interface ContributorScreenProps {
   onSaved: () => void;
 }
 
-function compressImage(file: File, maxWidth: number, quality: number): Promise<Blob> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        let { width, height } = img;
-        if (width > maxWidth) {
-          height = Math.round((height * maxWidth) / width);
-          width = maxWidth;
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) { reject(new Error('Canvas not supported')); return; }
-        ctx.drawImage(img, 0, 0, width, height);
-        canvas.toBlob(
-          (blob) => { if (blob) resolve(blob); else reject(new Error('Compression failed')); },
-          'image/jpeg',
-          quality
-        );
-      };
-      img.onerror = () => reject(new Error('Failed to load image'));
-      img.src = reader.result as string;
-    };
-    reader.onerror = () => reject(new Error('Failed to read file'));
-    reader.readAsDataURL(file);
-  });
-}
-
 export default function ContributorScreen({ pin, existingMessage, onBack, onSaved }: ContributorScreenProps) {
   const [senderName, setSenderName] = useState(existingMessage?.sender_name || '');
   const [message, setMessage] = useState(existingMessage?.message || '');
-  const [photoPath, setPhotoPath] = useState(existingMessage?.photo_path || null);
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [photoUrls, setPhotoUrls] = useState<string[]>(() => {
+    const legacyPhotoUrl = existingMessage?.photo_path
+      ? supabase.storage.from('birthday-media').getPublicUrl(existingMessage.photo_path).data.publicUrl
+      : null;
+    return Array.from(new Set([
+      ...(existingMessage?.photo_urls ?? []),
+      ...(legacyPhotoUrl ? [legacyPhotoUrl] : []),
+    ]));
+  });
+  const [uploadingPhotos, setUploadingPhotos] = useState(false);
+  const [photoUploadStatus, setPhotoUploadStatus] = useState<string | null>(null);
   const [voicePath, setVoicePath] = useState(existingMessage?.voice_path || null);
-  const [cardColor, setCardColor] = useState(existingMessage?.card_color || CARD_COLORS[0].value);
+  const [cardColor, setCardColor] = useState<string | null>(existingMessage?.card_color || null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingTime, setRecordingTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [videoPlaying, setVideoPlaying] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-
-  useEffect(() => {
-    if (existingMessage?.photo_path) {
-      const { data } = supabase.storage.from('birthday-media').getPublicUrl(existingMessage.photo_path);
-      setPhotoPreview(data.publicUrl);
-    }
-  }, [existingMessage]);
 
   const startRecording = async () => {
     try {
@@ -148,55 +127,58 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 10 * 1024 * 1024) {
-      setError('Photo must be under 10MB');
+    const input = e.currentTarget;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    if (files.length === 0) return;
+
+    const eligibleFiles = files.filter((file) => file.type.startsWith('image/') && file.size <= 10 * 1024 * 1024);
+    const rejectedCount = files.length - eligibleFiles.length;
+    if (eligibleFiles.length === 0) {
+      setError('Choose image files under 10MB each.');
       return;
     }
+    if (!cloudinaryUploadsConfigured()) {
+      setError('Photo uploads need a Cloudinary unsigned upload preset. Configure it in .env.local.');
+      return;
+    }
+
+    setError(null);
+    setUploadingPhotos(true);
+    const uploadedUrls: string[] = [];
+    const failedNames: string[] = [];
+
     try {
-      const compressed = await compressImage(file, 1280, 0.75);
-      if (compressed.size > 5 * 1024 * 1024) {
-        const moreCompressed = await compressImage(file, 800, 0.6);
-        const fileName = `photos/${pin}-${Date.now()}.jpg`;
-        const { error: uploadError } = await supabase.storage
-          .from('birthday-media')
-          .upload(fileName, moreCompressed, { contentType: 'image/jpeg', upsert: true });
-        if (uploadError) throw new Error('Failed to upload photo');
-        setPhotoPath(fileName);
-        setPhotoPreview(URL.createObjectURL(moreCompressed));
-      } else {
-        const fileName = `photos/${pin}-${Date.now()}.jpg`;
-        const { error: uploadError } = await supabase.storage
-          .from('birthday-media')
-          .upload(fileName, compressed, { contentType: 'image/jpeg', upsert: true });
-        if (uploadError) throw new Error('Failed to upload photo');
-        setPhotoPath(fileName);
-        setPhotoPreview(URL.createObjectURL(compressed));
+      for (const [index, file] of eligibleFiles.entries()) {
+        setPhotoUploadStatus(`Uploading image ${index + 1} of ${eligibleFiles.length}`);
+        try {
+          uploadedUrls.push(await uploadImageToCloudinary(file));
+        } catch {
+          failedNames.push(file.name);
+        }
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload photo');
+
+      if (uploadedUrls.length > 0) {
+        setPhotoUrls((currentUrls) => [...currentUrls, ...uploadedUrls]);
+      }
+      if (failedNames.length > 0 || rejectedCount > 0) {
+        setError(`${failedNames.length + rejectedCount} image(s) could not be added. Check file type, size, and Cloudinary settings.`);
+      }
+    } finally {
+      setUploadingPhotos(false);
+      setPhotoUploadStatus(null);
     }
   };
 
-  const removePhoto = () => {
-    setPhotoPath(null);
-    setPhotoPreview(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const toggleVideo = () => {
-    if (!videoRef.current) return;
-    if (videoPlaying) {
-      videoRef.current.pause();
-      setVideoPlaying(false);
-    } else {
-      videoRef.current.play();
-      setVideoPlaying(true);
-    }
+  const removePhoto = (index: number) => {
+    setPhotoUrls((currentUrls) => currentUrls.filter((_, photoIndex) => photoIndex !== index));
   };
 
   const handleSave = async () => {
+    if (!cardColor) {
+      setError('Please choose a card color before saving');
+      return;
+    }
     if (!senderName.trim()) {
       setError('Please enter your name');
       return;
@@ -208,7 +190,8 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
         pin,
         sender_name: senderName.trim(),
         message: message.trim() || null,
-        photo_path: photoPath,
+        photo_path: null,
+        photo_urls: photoUrls,
         voice_path: voicePath,
         card_color: cardColor,
       };
@@ -220,6 +203,7 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
             sender_name: payload.sender_name,
             message: payload.message,
             photo_path: payload.photo_path,
+            photo_urls: payload.photo_urls,
             voice_path: payload.voice_path,
             card_color: payload.card_color,
           })
@@ -246,14 +230,20 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
   const formatTime = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
   return (
-    <div className="h-[100dvh] overflow-hidden bg-gradient-to-b from-cream-50 via-cream-100 to-mint-100 flex flex-col">
+    <div className="relative isolate h-[100dvh] overflow-hidden flex flex-col">
+      <div
+        aria-hidden="true"
+        className="absolute inset-0 -z-10 bg-cover bg-center scale-110 blur-md"
+        style={{ backgroundImage: 'url(/images/bg.jpg)' }}
+      />
+      <div aria-hidden="true" className="absolute inset-0 -z-10 bg-cream-50/70" />
       {/* Header */}
       <div className="flex-shrink-0 bg-cream-50/90 backdrop-blur-md border-b border-sage-100">
         <div className="flex items-center px-4 py-2.5 max-w-3xl mx-auto">
           <button
-            onClick={onBack}
+            onClick={() => setShowLeaveConfirm(true)}
             className="w-8 h-8 rounded-full bg-sage-100 flex items-center justify-center text-sage-600 hover:bg-sage-200 transition-colors"
-            aria-label="Back"
+            aria-label="Back to home"
           >
             <ArrowLeft size={16} />
           </button>
@@ -289,44 +279,9 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
             </div>
           )}
 
-          {/* Two-column layout on desktop: video left, form right */}
-          <div className="flex flex-col lg:flex-row gap-3">
-            {/* Video - tap to play/pause */}
-            <div
-              className="relative rounded-2xl overflow-hidden bg-sage-800 aspect-video lg:w-1/3 lg:aspect-auto lg:min-h-[130px] shadow-lg shadow-sage-900/10 flex-shrink-0 cursor-pointer group"
-              onClick={toggleVideo}
-            >
-              <video
-                ref={videoRef}
-                className="absolute inset-0 w-full h-full object-cover"
-                onPlay={() => setVideoPlaying(true)}
-                onPause={() => setVideoPlaying(false)}
-                onEnded={() => setVideoPlaying(false)}
-                playsInline
-                preload="metadata"
-              >
-                <source src="/images/bg.jpg" type="video/mp4" />
-              </video>
-              <div className="absolute inset-0 bg-gradient-to-br from-sage-600/40 to-sage-900/40 pointer-events-none" />
-              {!videoPlaying && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-cream-50 pointer-events-none">
-                  <div className="w-12 h-12 rounded-full bg-cream-50/20 backdrop-blur-sm flex items-center justify-center mb-1.5 group-hover:scale-110 transition-transform">
-                    <Play size={20} className="ml-0.5" />
-                  </div>
-                  <p className="text-xs font-medium">Tap to play</p>
-                </div>
-              )}
-              {videoPlaying && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <div className="w-10 h-10 rounded-full bg-cream-50/15 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Pause size={18} className="text-cream-50" />
-                  </div>
-                </div>
-              )}
-            </div>
-
+          <div>
             {/* Identity & Wish Form */}
-            <div className="flex-1 space-y-2.5">
+            <div className="space-y-2.5">
               <div>
                 <label className="block text-xs font-medium text-sage-600 mb-1">
                   Who are you?
@@ -341,14 +296,14 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
               </div>
               <div>
                 <label className="block text-xs font-medium text-sage-600 mb-1">
-                  Birthday Wish
+                  Message to TJ
                 </label>
                 <textarea
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
                   placeholder="Write your birthday message to TJ..."
-                  rows={3}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-sage-200 text-sm text-sage-700 placeholder:text-sage-300 focus:border-sage-500 focus:outline-none transition-colors resize-none"
+                  rows={8}
+                  className="w-full min-h-[220px] px-3.5 py-2.5 rounded-xl bg-white border border-sage-200 text-sm text-sage-700 placeholder:text-sage-300 focus:border-sage-500 focus:outline-none transition-colors resize-y"
                 />
               </div>
             </div>
@@ -358,117 +313,131 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
           <div>
             <label className="block text-xs font-medium text-sage-600 mb-1.5 flex items-center gap-1.5">
               <Palette size={13} />
-              Card Color
+              Card color <span className="text-accent-rose">(required)</span>
             </label>
-            <div className="flex gap-2 flex-wrap">
-              {CARD_COLORS.map((color) => (
+            <div className="flex items-center gap-2">
+              <label
+                className="relative flex h-9 w-9 cursor-pointer items-center justify-center overflow-hidden rounded-full border-2 border-sage-300 text-sage-700 transition-colors hover:border-sage-500"
+                style={{ backgroundColor: cardColor ?? '#FFFFFF' }}
+                title="Choose a custom color"
+              >
+                <Palette size={15} className="pointer-events-none" />
+                <input
+                  type="color"
+                  value={cardColor ?? CARD_COLORS[0].value}
+                  onChange={(e) => setCardColor(e.target.value)}
+                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                  aria-label="Choose a custom card color (required)"
+                />
+              </label>
+
+              {[CARD_COLORS[0].value, CARD_COLORS[2].value, CARD_COLORS[4].value].map((sampleColor) => (
                 <button
-                  key={color.value}
-                  onClick={() => setCardColor(color.value)}
-                  className={`w-9 h-9 rounded-full border-2 transition-all active:scale-90 ${
-                    cardColor === color.value
-                      ? 'border-sage-600 scale-110 shadow-md'
-                      : 'border-sage-200 hover:border-sage-400'
+                  key={sampleColor}
+                  type="button"
+                  onClick={() => setCardColor(sampleColor)}
+                  className={`h-7 w-7 rounded-full border-2 transition-all ${
+                    cardColor === sampleColor ? 'border-sage-600 scale-110' : 'border-sage-200 hover:border-sage-400'
                   }`}
-                  style={{ backgroundColor: color.value }}
-                  aria-label={color.name}
-                  title={color.name}
+                  style={{ backgroundColor: sampleColor }}
+                  aria-label={`Use ${sampleColor} as card color`}
+                  title="Sample card color"
                 />
               ))}
-            </div>
-          </div>
 
-          {/* Voice Recorder + Photo Upload side by side on desktop */}
-          <div className="flex flex-col lg:flex-row gap-3">
-            {/* Voice Recorder */}
-            <div className="relative flex-1">
-              <div className="absolute -top-2 left-3 bg-gradient-to-r from-sage-500 to-sage-600 text-cream-50 text-xs font-medium px-2 py-0.5 rounded-full shadow-sm z-10">
-                Voice Message
-              </div>
-              <div className="bg-white rounded-2xl border-2 border-sage-200 p-3 pt-4">
-                {!voicePath && !isRecording ? (
-                  <button
-                    onClick={startRecording}
-                    className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-mint-100 text-sage-700 font-medium text-sm hover:bg-mint-200 transition-colors active:scale-[0.98]"
-                  >
-                    <Mic size={18} />
-                    Record a voice greeting
-                  </button>
-                ) : isRecording ? (
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <span className="w-2.5 h-2.5 rounded-full bg-accent-rose animate-pulse" />
-                      <span className="text-sage-700 font-mono text-sm">{formatTime(recordingTime)}</span>
-                    </div>
-                    <button
-                      onClick={stopRecording}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-accent-rose text-cream-50 text-sm font-medium hover:opacity-90 transition-opacity"
-                    >
-                      <Square size={14} />
-                      Stop
-                    </button>
-                  </div>
-                ) : voicePath ? (
+              {!voicePath && !isRecording ? (
+                <button
+                  onClick={startRecording}
+                  className="w-9 h-9 rounded-full text-sage-600 flex items-center justify-center hover:bg-sage-100 transition-colors"
+                  aria-label="Record voice message"
+                >
+                  <Mic size={16} />
+                </button>
+              ) : isRecording ? (
+                <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2.5">
-                    <button
-                      onClick={togglePlayback}
-                      className="w-9 h-9 rounded-full bg-sage-500 text-cream-50 flex items-center justify-center hover:bg-sage-600 transition-colors flex-shrink-0"
-                    >
-                      {isPlaying ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
-                    </button>
-                    <div className="flex-1 h-2 bg-sage-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-sage-400 rounded-full" style={{ width: isPlaying ? '100%' : '30%' }} />
-                    </div>
-                    <button
-                      onClick={deleteVoice}
-                      className="w-7 h-7 rounded-full bg-sage-100 flex items-center justify-center text-sage-500 hover:bg-sage-200 transition-colors flex-shrink-0"
-                      aria-label="Delete voice"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                    <audio
-                      ref={audioRef}
-                      onEnded={() => setIsPlaying(false)}
-                      className="hidden"
-                    />
+                    <span className="w-2.5 h-2.5 rounded-full bg-accent-rose animate-pulse" />
+                    <span className="text-sage-700 font-mono text-sm">{formatTime(recordingTime)}</span>
                   </div>
-                ) : null}
-              </div>
-            </div>
-
-            {/* Photo Upload - wider preview */}
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-sage-600 mb-1">
-                Add a Photo
-              </label>
-              {photoPreview ? (
-                <div className="relative rounded-xl overflow-hidden group">
-                  <img src={photoPreview} alt="Upload preview" className="w-full h-32 object-cover" />
                   <button
-                    onClick={removePhoto}
-                    className="absolute top-2 right-2 w-8 h-8 rounded-full bg-cream-50/90 flex items-center justify-center text-accent-rose hover:bg-cream-50 transition-colors shadow-sm"
-                    aria-label="Remove photo"
+                    onClick={stopRecording}
+                    className="w-8 h-8 rounded-full bg-accent-rose text-cream-50 flex items-center justify-center hover:opacity-90 transition-opacity"
+                    aria-label="Stop recording"
                   >
-                    <Trash2 size={15} />
+                    <Square size={12} />
                   </button>
                 </div>
-              ) : (
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full h-32 rounded-xl border-2 border-dashed border-sage-200 text-sage-500 hover:border-sage-400 hover:bg-sage-50 transition-colors flex flex-col items-center justify-center gap-2 text-sm font-medium"
-                >
-                  <Upload size={22} />
-                  Upload a photo with TJ
-                </button>
-              )}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handlePhotoUpload}
-                className="hidden"
-              />
+              ) : voicePath ? (
+                <>
+                  <button
+                    onClick={togglePlayback}
+                    className="w-9 h-9 rounded-full text-sage-600 flex items-center justify-center hover:bg-sage-100 transition-colors flex-shrink-0"
+                    aria-label={isPlaying ? 'Pause voice message' : 'Play voice message'}
+                  >
+                    {isPlaying ? <Pause size={16} /> : <Play size={16} className="ml-0.5" />}
+                  </button>
+                  <div className="flex-1 h-2 bg-sage-100 rounded-full overflow-hidden min-w-[60px]">
+                    <div className="h-full bg-sage-400 rounded-full" style={{ width: isPlaying ? '100%' : '30%' }} />
+                  </div>
+                  <button
+                    onClick={deleteVoice}
+                    className="w-7 h-7 rounded-full bg-sage-100 flex items-center justify-center text-sage-500 hover:bg-sage-200 transition-colors flex-shrink-0"
+                    aria-label="Delete voice"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                  <audio
+                    ref={audioRef}
+                    onEnded={() => setIsPlaying(false)}
+                    className="hidden"
+                  />
+                </>
+              ) : null}
             </div>
+            {!cardColor && (
+              <p className="mt-1 text-xs text-sage-500">Choose a color to enable saving.</p>
+            )}
+          </div>
+
+          {/* Photo Upload */}
+          <div className="min-w-0 flex-1 lg:flex-[1.35]">
+            <label className="mb-1 block text-xs font-medium text-sage-600">
+              Add your favorite photos together
+            </label>
+            {photoUrls.length > 0 && (
+              <div className="mb-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {photoUrls.map((photoUrl, index) => (
+                  <div key={`${photoUrl}-${index}`} className="group relative aspect-[4/3] overflow-hidden rounded-xl bg-sage-100">
+                    <img src={photoUrl} alt={`Photo ${index + 1}`} className="h-full w-full object-cover" />
+                    <button
+                      type="button"
+                      onClick={() => removePhoto(index)}
+                      className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-cream-50/90 text-accent-rose shadow-sm transition-colors hover:bg-cream-50"
+                      aria-label={`Remove photo ${index + 1}`}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingPhotos}
+              className="flex min-h-20 w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-sage-200 px-4 py-3 text-sm font-medium text-sage-500 transition-colors hover:border-sage-400 hover:bg-sage-50 disabled:cursor-wait disabled:opacity-60"
+            >
+              <Upload size={20} />
+              {photoUploadStatus || 'Add photos'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={handlePhotoUpload}
+              className="hidden"
+            />
           </div>
 
           {/* Error */}
@@ -480,10 +449,10 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
       <div className="flex-shrink-0 px-4 py-2.5 bg-cream-50/90 backdrop-blur-md border-t border-sage-100">
         <button
           onClick={handleSave}
-          disabled={saving}
-          className="w-full max-w-3xl mx-auto py-3 rounded-2xl bg-sage-500 text-cream-50 font-medium flex items-center justify-center gap-2 hover:bg-sage-600 transition-all active:scale-[0.98] shadow-md shadow-sage-900/15 disabled:opacity-50"
+          disabled={saving || uploadingPhotos || !cardColor}
+          className="w-full max-w-3xl mx-auto py-3 rounded-2xl bg-sage-500 text-cream-50 font-medium flex items-center justify-center gap-2 hover:bg-sage-600 transition-all active:scale-[0.98] shadow-md shadow-sage-900/15 disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {saving ? 'Saving...' : saved ? (
+          {uploadingPhotos ? 'Uploading photos...' : saving ? 'Saving...' : saved ? (
             <>
               <Check size={18} />
               Saved!
@@ -493,6 +462,39 @@ export default function ContributorScreen({ pin, existingMessage, onBack, onSave
           )}
         </button>
       </div>
+      {showLeaveConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-sage-900/50 px-4 backdrop-blur-sm">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="leave-confirm-title"
+            className="w-full max-w-sm rounded-2xl bg-cream-50 p-5 shadow-xl"
+          >
+            <h2 id="leave-confirm-title" className="font-serif text-lg text-sage-800">
+              Go back to the home screen?
+            </h2>
+            <p className="mt-2 text-sm text-sage-600">
+              Your unsaved message and changes may be lost.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowLeaveConfirm(false)}
+                className="rounded-xl px-4 py-2 text-sm font-medium text-sage-700 hover:bg-sage-100"
+              >
+                Keep editing
+              </button>
+              <button
+                type="button"
+                onClick={onBack}
+                className="rounded-xl bg-sage-600 px-4 py-2 text-sm font-medium text-white hover:bg-sage-700"
+              >
+                Leave page
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

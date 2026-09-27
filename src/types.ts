@@ -4,6 +4,7 @@ export interface Message {
   sender_name: string;
   message: string | null;
   photo_path: string | null;
+  photo_urls: string[];
   voice_path: string | null;
   card_color: string;
   hearted: boolean;

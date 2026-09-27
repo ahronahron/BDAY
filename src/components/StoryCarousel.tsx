@@ -2,11 +2,16 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 const STORIES = [
-  '/images/img1.jpg',
-  '/images/img2.jpg',
-  '/images/img3.jpg',
-  '/images/img5.jpg',
-  '/images/bg.jpg',
+  { type: 'image', src: '/images/img1.jpg' },
+  { type: 'image', src: '/images/img2.jpg' },
+  { type: 'image', src: '/images/img3.jpg' },
+  { type: 'image', src: '/images/img4.jpg' },
+  { type: 'image', src: '/images/img5.jpg' },
+  { type: 'image', src: '/images/img6.jpg' },
+  { type: 'image', src: '/images/img7.jpg' },
+  { type: 'image', src: '/images/img8.jpg' },
+  { type: 'image', src: '/images/img9.jpg' },
+  { type: 'video', src: '/images/vid1.mp4' },
 ];
 
 const STORY_DURATION = 5000;
@@ -17,6 +22,8 @@ export default function StoryCarousel() {
   const [paused, setPaused] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const touchStartX = useRef<number | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const currentStory = STORIES[currentIndex];
 
   const goNext = useCallback(() => {
     setCurrentIndex((prev) => (prev + 1) % STORIES.length);
@@ -29,7 +36,7 @@ export default function StoryCarousel() {
   }, []);
 
   useEffect(() => {
-    if (paused) return;
+    if (paused || currentStory.type === 'video') return;
     intervalRef.current = setInterval(() => {
       setProgress((p) => {
         if (p >= 100) {
@@ -46,7 +53,25 @@ export default function StoryCarousel() {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
+  }, [currentIndex, currentStory.type, paused]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (paused) video.pause();
+    else void video.play().catch(() => undefined);
   }, [currentIndex, paused]);
+
+  const handleVideoProgress = () => {
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.duration) && video.duration > 0) {
+      setProgress((video.currentTime / video.duration) * 100);
+    }
+  };
+
+  const handleVideoEnded = () => {
+    goNext();
+  };
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0].clientX;
@@ -80,24 +105,35 @@ export default function StoryCarousel() {
         ))}
       </div>
 
-      {/* Story image */}
+      {/* Story media */}
       <div
         className="relative rounded-2xl overflow-hidden bg-sage-100 aspect-[4/5] shadow-lg shadow-sage-900/10"
         onMouseDown={() => setPaused(true)}
         onMouseUp={() => setPaused(false)}
         onMouseLeave={() => setPaused(false)}
       >
-        {STORIES.map((src, i) => (
-          <img
-            key={i}
-            src={src}
-            alt={`TJ story ${i + 1}`}
-            className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-500 ${
-              i === currentIndex ? 'opacity-100' : 'opacity-0'
-            }`}
-            loading={i === 0 ? 'eager' : 'lazy'}
+        {currentStory.type === 'video' ? (
+          <video
+            key={currentStory.src}
+            ref={videoRef}
+            src={currentStory.src}
+            className="absolute inset-0 h-full w-full object-cover"
+            autoPlay
+            muted
+            playsInline
+            onTimeUpdate={handleVideoProgress}
+            onEnded={handleVideoEnded}
+            onClick={() => setPaused((value) => !value)}
           />
-        ))}
+        ) : (
+          <img
+            key={currentStory.src}
+            src={currentStory.src}
+            alt={`TJ story ${currentIndex + 1}`}
+            className="absolute inset-0 h-full w-full animate-story-fade object-cover"
+            loading={currentIndex === 0 ? 'eager' : 'lazy'}
+          />
+        )}
 
         {/* Gradient overlay */}
         <div className="absolute inset-0 bg-gradient-to-t from-sage-900/30 via-transparent to-transparent pointer-events-none" />

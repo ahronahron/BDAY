@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Pause, Play } from 'lucide-react';
 import Landing from '@/components/Landing';
 import ContributorScreen from '@/components/ContributorScreen';
 import TjWall from '@/components/TjWall';
@@ -12,69 +13,67 @@ function App() {
   const [existingMessage, setExistingMessage] = useState<Message | null>(null);
   const [showTjLogin, setShowTjLogin] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
-  const [pinError, setPinError] = useState<string | null>(null);
-  const [pinLoading, setPinLoading] = useState(false);
+  const [isMusicPlaying, setIsMusicPlaying] = useState(false);
+  const backgroundAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const handleCreatePin = async (pin: string) => {
-    setPinError(null);
-    setPinLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('id')
-        .eq('pin', pin)
-        .maybeSingle();
+  useEffect(() => {
+    const audio = backgroundAudioRef.current;
+    if (!audio || sessionStorage.getItem('birthday-intro-audio-attempted')) return;
 
-      if (error) throw new Error('Something went wrong. Please try again.');
-      if (data) throw new Error('That code is already taken. Pick another one.');
+    sessionStorage.setItem('birthday-intro-audio-attempted', 'true');
+    void audio.play().catch(() => setIsMusicPlaying(false));
+  }, []);
 
-      setCurrentPin(pin);
-      setExistingMessage(null);
-      setView('contributor');
-    } catch (err) {
-      setPinError(err instanceof Error ? err.message : 'Something went wrong');
-    } finally {
-      setPinLoading(false);
+  const toggleBackgroundMusic = () => {
+    const audio = backgroundAudioRef.current;
+    if (!audio) return;
+
+    if (audio.paused) {
+      void audio.play().catch(() => setIsMusicPlaying(false));
+    } else {
+      audio.pause();
     }
   };
 
-  const handleEnterPin = async (pin: string) => {
-    // This is called for create mode; for enter mode we use handleVerifyIdentity
+  const handleCreatePin = async (pin: string) => {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('id')
+      .eq('pin', pin)
+      .maybeSingle();
+
+    if (error) throw new Error('Something went wrong. Please try again.');
+    if (data) throw new Error('That code is already taken. Pick another one.');
+
+    setCurrentPin(pin);
+    setExistingMessage(null);
+    setView('contributor');
   };
 
   const handleVerifyIdentity = async (pin: string, name: string) => {
-    setPinError(null);
-    setPinLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('pin', pin)
-        .maybeSingle();
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('pin', pin)
+      .maybeSingle();
 
-      if (error) throw new Error('Something went wrong. Please try again.');
-      if (!data) throw new Error('No message found with that code.');
+    if (error) throw new Error('Something went wrong. Please try again.');
+    if (!data) throw new Error('No message found with that code.');
 
-      const fetchedData = data as Message;
-      if (fetchedData.sender_name.toLowerCase().trim() !== name.toLowerCase().trim()) {
-        throw new Error('Name does not match this code. Please check and try again.');
-      }
-
-      setCurrentPin(pin);
-      setExistingMessage(fetchedData);
-      setView('contributor');
-    } catch (err) {
-      setPinError(err instanceof Error ? err.message : 'Something went wrong');
-    } finally {
-      setPinLoading(false);
+    const fetchedData = data as Message;
+    if (fetchedData.sender_name.toLowerCase().trim() !== name.toLowerCase().trim()) {
+      throw new Error('Name does not match this code. Please check and try again.');
     }
+
+    setCurrentPin(pin);
+    setExistingMessage(fetchedData);
+    setView('contributor');
   };
 
   const handleBackToLanding = () => {
     setView('landing');
     setCurrentPin(null);
     setExistingMessage(null);
-    setPinError(null);
   };
 
   const handleSaved = () => {
@@ -84,8 +83,9 @@ function App() {
     setShowShareModal(true);
   };
 
+  let currentScreen;
   if (view === 'contributor' && currentPin) {
-    return (
+    currentScreen = (
       <ContributorScreen
         pin={currentPin}
         existingMessage={existingMessage}
@@ -93,20 +93,25 @@ function App() {
         onSaved={handleSaved}
       />
     );
-  }
-
-  if (view === 'tj-wall') {
-    return <TjWall onBack={handleBackToLanding} />;
-  }
-
-  return (
-    <>
+  } else if (view === 'tj-wall') {
+    currentScreen = (
+      <TjWall
+        onBack={handleBackToLanding}
+        isMusicPlaying={isMusicPlaying}
+        onToggleMusic={toggleBackgroundMusic}
+      />
+    );
+  } else {
+    currentScreen = (
+      <>
       <Landing
         onCreatePin={handleCreatePin}
-        onEnterPin={handleEnterPin}
+        onVerifyIdentity={handleVerifyIdentity}
         onTjClick={() => setShowTjLogin(true)}
         showShareModal={showShareModal}
         onCloseShareModal={() => setShowShareModal(false)}
+        isMusicPlaying={isMusicPlaying}
+        onToggleMusic={toggleBackgroundMusic}
       />
       {showTjLogin && (
         <TjLogin
@@ -117,6 +122,22 @@ function App() {
           }}
         />
       )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      {currentScreen}
+      <audio
+        ref={backgroundAudioRef}
+        src="/audio/IV%20OF%20SPADES%20-%20Tangerine%20Boulevard%20(Official%20Lyric%20Video).mp3"
+        preload="auto"
+        onPlay={() => setIsMusicPlaying(true)}
+        onPause={() => setIsMusicPlaying(false)}
+        onEnded={() => setIsMusicPlaying(false)}
+        className="hidden"
+      />
     </>
   );
 }
